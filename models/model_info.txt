@@ -1,0 +1,11 @@
+LinkedIn Growth AI - Model Training Info
+==================================================
+
+Training Date: 2026-02-21 14:16:38.731197
+Number of Posts: 1608
+Number of Features: 45
+Models Trained:
+  - Linear Regression (engagement)
+  - Ridge Regression (engagement)
+  - Logistic Regression (viral prediction)
+  - Logistic Regression (comment prediction)
