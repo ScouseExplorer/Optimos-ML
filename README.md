@@ -189,7 +189,7 @@ Want to train on your own data? Check out `DATA_COLLECTION_GUIDE.md` for:
 - **Backend**: Python, Flask
 - **ML**: scikit-learn, pandas, numpy
 - **NLP**: NLTK, spaCy, TextBlob
-- **AI**: OpenAI GPT-3.5/4
+- **AI**: OpenAI GPT-5
 - **Data**: CSV-based training data
 
 ## 🤝 Contributing

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 # Load environment variables
-load_dotenv()
+load_dotenv()  # This will load from .env in the current working directory
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent
@@ -329,36 +329,59 @@ CURRENT PERFORMANCE ANALYSIS:
 - Has Question: {'Yes' if features_dict.get('has_question', 0) else 'No'}
 - Sentiment: {'Positive' if features_dict.get('sentiment_polarity', 0) > 0 else 'Negative'}
 
-REQUIRED IMPROVEMENTS:
-{chr(10).join(f'- {imp}' for imp in improvements_needed)}
+KEY IMPROVEMENTS NEEDED:
+{chr(10).join(f'• {imp}' for imp in improvements_needed)}
 
-INSTRUCTIONS:
-1. Keep the core message and authenticity of the original post
-2. Apply all improvements listed above
-3. Use a {style_tone}
-4. Optimize for LinkedIn's algorithm (engagement, saves, shares)
-5. Make it scan-friendly with line breaks and emojis where appropriate
-6. Ensure 150-250 words (sweet spot for engagement)
-7. Add 3-5 relevant hashtags at the end
-8. Include a question or call-to-action to drive comments
+YOUR TASK:
+Create an improved version of this LinkedIn post that:
+1. Keeps the original message and authenticity
+2. Applies the improvements listed above
+3. Uses a {style_tone}
+4. Optimizes for LinkedIn engagement (saves, shares, comments)
+5. Uses line breaks for readability
+6. Is between 150-250 words
+7. Includes 3-5 relevant hashtags at the end
+8. Includes a question or call-to-action
 
-Return ONLY the improved post, no explanations."""
+IMPORTANT: Return ONLY the improved post text. No explanations, no metadata, just the post content."""
 
     # Step 4: Generate refined versions with OpenAI
     try:
         refined_versions = []
         for i in range(min(request.variants, 3)):
+            model_to_use = os.getenv("OPENAI_MODEL", "gpt-5")
+            
+            print(f"\n[DEBUG] Calling OpenAI with:")
+            print(f"  Model: {model_to_use}")
+            print(f"  Max tokens: {os.getenv('OPENAI_MAX_TOKENS', 500)}")
+            print(f"  Prompt length: {len(prompt)} characters")
+            
             response = openai_client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+                model=model_to_use,
                 messages=[
                     {"role": "system", "content": "You are an expert LinkedIn content writer who creates engaging, high-performing posts."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=float(os.getenv("OPENAI_TEMPERATURE", 0.7)) + (i * 0.1),  # Slight variation for multiple versions
-                max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", 500))
+                max_completion_tokens=int(os.getenv("OPENAI_MAX_TOKENS", 500))
             )
             
+            print(f"\n[DEBUG] Response received:")
+            print(f"  Response object: {response}")
+            print(f"  Choices: {response.choices}")
+            print(f"  Message content: '{response.choices[0].message.content}'")
+            print(f"  Content length: {len(response.choices[0].message.content)} characters")
+            
             refined_post = response.choices[0].message.content.strip()
+            
+            # Check if response is empty
+            if not refined_post:
+                print(f"\n[WARNING] Model returned empty response for variant {i+1}")
+                print(f"Full response: {response}")
+                # Fallback: return the original content if empty
+                refined_post = request.content
+            else:
+                print(f"[SUCCESS] Refined post generated ({len(refined_post)} chars)")
+            
             refined_versions.append(refined_post)
         
         # Step 5: Predict engagement for refined version(s)
@@ -385,9 +408,11 @@ Return ONLY the improved post, no explanations."""
         }
     
     except Exception as e:
+        print(f"Error during refinement: {str(e)}")
+        print(f"Error type: {type(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI API error: {str(e)}"
+            detail=f"OpenAI API error: Error code: {str(e)}"
         )
 
 @app.post("/refine/compare")

@@ -77,19 +77,13 @@ C:/Users/akinl/LinkedIn-AI/.venv/Scripts/python.exe test_refine.py
 
 ## 💰 Cost Breakdown
 
-### GPT-3.5-Turbo (Recommended)
-- **Input**: $0.0015 per 1K tokens
-- **Output**: $0.002 per 1K tokens
-- **Per post**: ~$0.001-0.003 (basically free)
-- **1,000 posts**: ~$2-3
+### GPT-5 (Recommended)
+- **High performance with excellent quality**
+- **Per post**: ~$0.01-0.05
+- **Superior accuracy and reasoning**
+- **1,000 posts**: ~$10-50
 
-### GPT-4 (Premium Quality)
-- **Input**: $0.03 per 1K tokens
-- **Output**: $0.06 per 1K tokens
-- **Per post**: ~$0.02-0.05
-- **1,000 posts**: ~$30-50
-
-**Recommendation**: Start with GPT-3.5-turbo, upgrade to GPT-4 if needed.
+**Recommendation**: Use GPT-5 for optimal results and best performance.
 
 ---
 
