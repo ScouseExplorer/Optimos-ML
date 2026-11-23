@@ -1,9 +1,26 @@
 LinkedIn Growth AI - Model Training Info
 ==================================================
 
-Training Date: 2026-02-21 14:16:38.731197
-Number of Posts: 1608
+Training Date: 2026-11-20 02:10:27.710768
+Number of Posts: 2949
+Training Samples: 2014
+Validation Samples: 434
+Evaluation Samples: 443
 Number of Features: 45
+Engagement Target: Observed likes + comments + shares
+Comment Target: Observed comments > 0
+Exact Duplicate Groups: 47
+Near Duplicate Groups: 21
+Metrics Capture Time Missing: 2949
+Selected Regression Model: baseline_mean
+Validation baseline_mean: MAE=43.9851, RMSE=164.8961
+Validation linear: MAE=51.0749, RMSE=168.9088
+Validation ridge: MAE=51.0615, RMSE=168.9023
+Final Test baseline_mean: MAE=34.4837, RMSE=37.9575, Spearman=None
+Final Test linear: MAE=56.6388, RMSE=71.7986, Spearman=0.06843798471995743
+Final Test ridge: MAE=56.6211, RMSE=71.7745, Spearman=0.06881394119715889
+Final Test comment_accuracy: 0.5260
+Final Test viral_accuracy: 0.4650
 Models Trained:
   - Linear Regression (engagement)
   - Ridge Regression (engagement)
