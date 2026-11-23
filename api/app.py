@@ -1,6 +1,7 @@
 # api/app.py
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+from enum import Enum
 import pickle
 import numpy as np
 import pandas as pd
@@ -29,10 +30,31 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from nlp.feature_extractor import NLPFeatureExtractor
+from intelligence.content.content_effectiveness import ContentEffectivenessEngine
+from intelligence.performance.engagement_intelligence import EngagementIntelligenceEngine
+from intelligence.performance.performance_prediction import PerformancePredictionEngine
+from intelligence.personal.recommendations import recommend_strategy
+from intelligence.orchestrator.engine import IntelligenceOrchestrator
+from intelligence.orchestrator.registry import build_default_registry
+from intelligence.orchestrator.schemas import AnalysisRequest
+from intelligence.generative.llm_client import OpenAITextProvider, GenerativeProviderError
+from intelligence.generative.refinement import RefinementService
+from intelligence.generative.explanation import compare_assessments
+
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+ML_SERVICE_API_KEY = os.getenv("ML_SERVICE_API_KEY", "").strip()
+AUTH_REQUIRED = bool(ML_SERVICE_API_KEY)
+MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", "12000"))
+MAX_VARIANTS = int(os.getenv("MAX_VARIANTS", "3"))
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "10"))
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
+
+if ENVIRONMENT in {"production", "staging"} and not ML_SERVICE_API_KEY:
+    raise RuntimeError("ML_SERVICE_API_KEY is required outside development")
 
 app = FastAPI(
-    title="LinkedIn Growth AI - Real Data Edition",
-    description="Predict LinkedIn post engagement using ML models trained on 1,608 real posts + AI refinement",
+    title="LinkedIn Growth AI",
+    description="Evaluate content, summarize observed engagement, and report performance-prediction readiness",
     version="2.1"
 )
 
@@ -40,16 +62,21 @@ app = FastAPI(
 models = {}
 scalers = {}
 feature_names = []
+training_metadata = {}
 nlp_extractor = None
 sentence_transformer_model = None
+content_effectiveness_engine = None
+engagement_intelligence_engine = EngagementIntelligenceEngine()
+performance_prediction_engine = PerformancePredictionEngine(training_metadata)
 
 MODEL_VERSIONS = {
-    "engagement_predictor": "1.0.0",
+    "content_effectiveness": "1.0.0",
+    "engagement_intelligence": "1.0.0",
+    "performance_prediction": "0.1.0",
     "topic_classifier": "0.1.0",
     "format_classifier": "0.1.0",
     "hook_classifier": "0.1.0",
     "genericity_detector": "0.1.0",
-    "recommendation_engine": "0.1.0",
     "semantic_similarity": "0.2.0",
     "feedback_ingestion": "0.1.0",
 }
@@ -58,8 +85,6 @@ logger = logging.getLogger("linkedin_ml_service")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-ML_SERVICE_API_KEY = os.getenv("ML_SERVICE_API_KEY", "").strip()
-AUTH_REQUIRED = bool(ML_SERVICE_API_KEY)
 REQUEST_ID_HEADER = "X-Request-ID"
 API_KEY_HEADER = "X-ML-API-Key"
 FEEDBACK_PATH = os.path.join(project_root, "data", "feedback_events.jsonl")
@@ -67,20 +92,23 @@ os.makedirs(os.path.dirname(FEEDBACK_PATH), exist_ok=True)
 
 # OpenAI client
 openai_client = None
+refinement_service = None
 try:
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key and api_key != "your_openai_api_key_here":
         openai_client = OpenAI(api_key=api_key)
-        print("✓ OpenAI API initialized")
+        refinement_service = RefinementService(OpenAITextProvider(openai_client))
+        print("OpenAI API initialized")
     else:
-        print("⚠️  OpenAI API key not found. AI refinement will be disabled.")
+        print("OpenAI API key not found. AI refinement will be disabled.")
         print("   Add OPENAI_API_KEY to .env file to enable.")
 except Exception as e:
-    print(f"⚠️  OpenAI initialization warning: {e}")
+    print(f"OpenAI initialization warning: {e}")
 
 def load_trained_models():
-    """Load pre-trained models from disk (trained on 1,608 LinkedIn posts)"""
-    global models, scalers, feature_names, nlp_extractor
+    """Load pre-trained models and their training metadata from disk."""
+    global models, scalers, feature_names, training_metadata, nlp_extractor
+    global content_effectiveness_engine, performance_prediction_engine
     
     model_path = os.path.join(project_root, 'models', 'linkedin_models.pkl')
     
@@ -89,11 +117,11 @@ def load_trained_models():
         try:
             nlp_extractor = NLPFeatureExtractor()
         except Exception as e:
-            print(f"⚠️  NLP extractor initialization warning: {e}")
+            print(f"NLP extractor initialization warning: {e}")
 
     if not os.path.exists(model_path):
-        print(f"⚠️  Trained models not found at {model_path}")
-        print("⚠️  Run 'python train_models.py' first to train models on your data")
+        print(f"Trained models not found at {model_path}")
+        print("Run 'python train_models.py' first to train models on your data")
         return False
     
     try:
@@ -105,26 +133,30 @@ def load_trained_models():
         models['classification'] = model_data['classification_models']
         scalers['standard'] = model_data['scaler']
         feature_names = model_data['feature_names']
+        training_metadata = model_data.get('training_metadata', {})
+        performance_prediction_engine = PerformancePredictionEngine(training_metadata)
         
         # Initialize NLP feature extractor
         nlp_extractor = NLPFeatureExtractor()
+        content_effectiveness_engine = ContentEffectivenessEngine(nlp_extractor)
         
-        print("✓ Models loaded successfully!")
+        print("Models loaded successfully!")
         print(f"  - Regression models: {list(models['regression'].keys())}")
         print(f"  - Classification models: {list(models['classification'].keys())}")
         print(f"  - Features: {len(feature_names)} NLP features")
-        print(f"  - Trained on: 1,608 real LinkedIn posts")
+        print(f"  - Training samples: {training_metadata.get('training_samples', 'unknown')}")
+        print(f"  - Engagement target: {training_metadata.get('engagement_target', 'unknown')}")
         
         return True
     
     except Exception as e:
-        print(f"✗ Error loading models: {e}")
+        print(f"Error loading models: {e}")
         return False
 
 # Load models on startup
 if not load_trained_models():
     print("\n" + "="*60)
-    print("⚠️  MODELS NOT LOADED - API will not work properly")
+    print("MODELS NOT LOADED - API will not work properly")
     print("="*60)
     print("\nTo fix this:")
     print("1. Run: python train_models.py")
@@ -134,7 +166,7 @@ if not load_trained_models():
 
 # Pydantic models
 class PostRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
 
 class PredictionResponse(BaseModel):
     content_preview: str
@@ -143,18 +175,19 @@ class PredictionResponse(BaseModel):
     optimization_suggestions: List[str]
 
 class ExtractFeaturesRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
 
 class ClassifyContentRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
 
 class AnalyzePostRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
     user_profile: Optional[Dict[str, Any]] = None
-    historical_posts: Optional[List[str]] = None
+    historical_posts: Optional[List[Any]] = None
+    intended_topic: Optional[str] = None
 
 class ValidatePostRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
     recommended_strategy: Optional[Dict[str, Any]] = None
     user_profile: Optional[Dict[str, Any]] = None
     historical_posts: Optional[List[str]] = None
@@ -162,13 +195,13 @@ class ValidatePostRequest(BaseModel):
 class AnalyzeUserRequest(BaseModel):
     user_id: Optional[str] = None
     profile: Optional[Dict[str, Any]] = None
-    historical_posts: List[str] = Field(default_factory=list)
+    historical_posts: List[Any] = Field(default_factory=list)
     performance: Optional[List[Dict[str, Any]]] = None
 
 class RecommendContentRequest(BaseModel):
     user_id: Optional[str] = None
     profile: Optional[Dict[str, Any]] = None
-    historical_posts: List[str] = Field(default_factory=list)
+    historical_posts: List[Any] = Field(default_factory=list)
     historical_performance: Optional[List[Dict[str, Any]]] = None
     global_context: Optional[List[Dict[str, Any]]] = None
     goal: str = "increase engagement"
@@ -178,14 +211,32 @@ class RecommendContentRequest(BaseModel):
 class CompareCandidatesRequest(BaseModel):
     user_id: Optional[str] = None
     profile: Optional[Dict[str, Any]] = None
-    historical_posts: List[str] = Field(default_factory=list)
-    candidates: List[str]
+    historical_posts: List[Any] = Field(default_factory=list)
+    candidates: List[str] = Field(..., max_length=MAX_CANDIDATES)
+    intended_topic: Optional[str] = None
 
+class IntelligenceAnalyzeRequest(BaseModel):
+    account_id: Optional[str] = Field(default=None, description="Opaque application account identifier; never infer this from public author names")
+    content: Optional[str] = None
+    intended_topic: Optional[str] = None
+    profile: Optional[Dict[str, Any]] = None
+    goal: Optional[str] = None
+    historical_posts: List[Any] = Field(default_factory=list)
+    historical_performance: List[Dict[str, Any]] = Field(default_factory=list)
+    global_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    components: Optional[List[str]] = None
+
+
+class RecommendationFeedbackType(str, Enum):
+    accepted = "accepted"
+    rejected = "rejected"
+    used = "used"
+    helpful = "helpful"
 
 class FeedbackUserEventRequest(BaseModel):
     user_id: str
     recommendation_id: Optional[str] = None
-    event_type: str
+    event_type: RecommendationFeedbackType
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -267,18 +318,6 @@ def _safe_div(num: float, den: float) -> float:
 
 def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, value))
-
-
-def _normalize_engagement_rate(item: Dict[str, Any]) -> float:
-    likes = float(item.get("likes", 0) or 0)
-    comments = float(item.get("comments", 0) or 0)
-    reposts = float(item.get("reposts", item.get("shares", 0)) or 0)
-    followers = float(item.get("followers", item.get("follower_count", 0)) or 0)
-    total = likes + comments + reposts
-
-    if followers > 0:
-        return _safe_div(total, followers)
-    return total
 
 
 def _classify_topic(features: Dict[str, float], text: str) -> Dict[str, Any]:
@@ -517,149 +556,16 @@ def _append_feedback_event(event: Dict[str, Any]) -> None:
 
 
 def _compute_calibration_delta(predicted: Optional[Dict[str, Any]], metrics: Dict[str, Any]) -> Optional[float]:
-    if not predicted:
-        return None
-
-    pred = predicted.get("engagement_score")
-    if pred is None:
-        return None
-
-    likes = float(metrics.get("likes", 0) or 0)
-    comments = float(metrics.get("comments", 0) or 0)
-    reposts = float(metrics.get("reposts", metrics.get("shares", 0)) or 0)
-    followers = float(metrics.get("followers", metrics.get("follower_count", 0)) or 0)
-    actual = _safe_div(likes + comments + reposts, followers) * 100 if followers > 0 else likes + comments + reposts
-    return round(float(actual - float(pred)), 3)
-
-
-def _calculate_confidence(sample_size: int, has_model: bool = True) -> float:
-    # Confidence rises with sample size and with trained model availability.
-    sample_component = min(1.0, _safe_div(sample_size, 50.0))
-    model_component = 1.0 if has_model else 0.65
-    return round(_clamp(0.25 + 0.55 * sample_component + 0.2 * (model_component - 0.65)), 2)
-
-
-def _predict_scores_from_features(X_scaled: Optional[np.ndarray]) -> Dict[str, Any]:
-    result = {
-        "engagement_score": None,
-        "viral_probability": None,
-        "model": {"name": "engagement_predictor", "version": MODEL_VERSIONS["engagement_predictor"]},
-    }
-    if X_scaled is None or not models:
-        return result
-
-    linear_model = models.get("regression", {}).get("linear")
-    viral_model = models.get("classification", {}).get("viral")
-    if linear_model is not None:
-        result["engagement_score"] = round(float(linear_model.predict(X_scaled)[0]), 2)
-    if viral_model is not None:
-        result["viral_probability"] = round(float(viral_model.predict_proba(X_scaled)[0][1] * 100), 1)
-
-    return result
-
-
-def _derive_strengths_weaknesses(features: Dict[str, float]) -> Dict[str, List[str]]:
-    strengths: List[str] = []
-    weaknesses: List[str] = []
-
-    if features.get("has_question", 0) > 0:
-        strengths.append("Includes a question that can stimulate comments")
-    else:
-        weaknesses.append("No question present for audience interaction")
-
-    if features.get("hashtag_count", 0) >= 3:
-        strengths.append("Hashtags are in a healthy range for discoverability")
-    else:
-        weaknesses.append("Hashtag usage is low; consider 3-5 relevant hashtags")
-
-    if 120 <= features.get("word_count", 0) <= 300:
-        strengths.append("Word count is in the common high-engagement range")
-    else:
-        weaknesses.append("Word count may be suboptimal for LinkedIn engagement")
-
-    if features.get("cta_score", 0) > 0:
-        strengths.append("Contains call-to-action language")
-    else:
-        weaknesses.append("Missing clear call-to-action")
-
-    if features.get("sentiment_polarity", 0) < 0:
-        weaknesses.append("Negative tone may reduce engagement for broad audiences")
-
-    return {"strengths": strengths, "weaknesses": weaknesses}
+    """Calibration is disabled until a validated numeric performance target exists."""
+    return None
 
 
 def _analyze_personal_performance(
-    historical_posts: List[str],
+    historical_posts: List[Any],
     performance: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    if not historical_posts:
-        return {
-            "sample_size": 0,
-            "confidence": 0.2,
-            "best_topics": [],
-            "best_formats": [],
-            "weak_topics": [],
-            "strong_hooks": [],
-        }
-
-    topic_perf: Dict[str, List[float]] = {}
-    format_perf: Dict[str, List[float]] = {}
-    hook_perf: Dict[str, List[float]] = {}
-    fallback_rates: List[float] = []
-
-    for idx, post in enumerate(historical_posts):
-        if not post:
-            continue
-        _, feat = extract_nlp_features(post)
-        topic = _classify_topic(feat, post)["topic"]
-        fmt = _classify_format(feat, post)["format"]
-        hook = _classify_hook(post)["hook_type"]
-
-        if performance and idx < len(performance):
-            score = _normalize_engagement_rate(performance[idx])
-        else:
-            score = (
-                feat.get("has_question", 0) * 0.15 +
-                min(feat.get("hashtag_count", 0), 5) * 0.05 +
-                feat.get("cta_score", 0) * 0.08 +
-                0.2
-            )
-            fallback_rates.append(score)
-
-        topic_perf.setdefault(topic, []).append(score)
-        format_perf.setdefault(fmt, []).append(score)
-        hook_perf.setdefault(hook, []).append(score)
-
-    def _relative_rank(group: Dict[str, List[float]]) -> List[Dict[str, Any]]:
-        if not group:
-            return []
-        avg = {k: float(np.mean(v)) for k, v in group.items() if v}
-        baseline = float(np.mean(list(avg.values()))) if avg else 1.0
-        ranked = sorted(avg.items(), key=lambda x: x[1], reverse=True)
-        return [
-            {
-                "name": k,
-                "relative_performance": round(_safe_div(v, baseline if baseline else 1.0), 2),
-                "sample_size": len(group[k]),
-            }
-            for k, v in ranked
-        ]
-
-    topic_rank = _relative_rank(topic_perf)
-    format_rank = _relative_rank(format_perf)
-    hook_rank = _relative_rank(hook_perf)
-    sample_size = len([p for p in historical_posts if p])
-
-    return {
-        "sample_size": sample_size,
-        "confidence": _calculate_confidence(sample_size, has_model=True),
-        "best_topics": topic_rank[:3],
-        "weak_topics": list(reversed(topic_rank[-2:])) if len(topic_rank) > 2 else [],
-        "best_formats": format_rank[:3],
-        "strong_hooks": hook_rank[:3],
-        "uses_observed_performance": bool(performance),
-        "fallback_proxy_used": not bool(performance),
-    }
+    identified_posts = [post for post in historical_posts if isinstance(post, dict)]
+    return engagement_intelligence_engine.analyze(identified_posts, performance)
 
 
 def _build_blueprint(topic: str, fmt: str, hook_type: str) -> Dict[str, Any]:
@@ -732,26 +638,64 @@ def extract_nlp_features(text: str) -> np.ndarray:
     
     return X, features_dict
 
+
 # API Endpoints
 @app.get("/")
 async def root():
     """Health check and API info"""
     return {
-        "message": "LinkedIn Growth AI - Trained on 1,608 Real Posts",
+        "message": "LinkedIn Growth AI",
         "version": "2.0",
-        "models_loaded": len(models) > 0,
-        "regression_models": list(models.get('regression', {}).keys()) if models else [],
-        "classification_models": list(models.get('classification', {}).keys()) if models else [],
+        "engines": {
+            "content_effectiveness": "ready" if content_effectiveness_engine else "unavailable",
+            "engagement_intelligence": "ready",
+            "performance_prediction": performance_prediction_engine.readiness()["status"],
+        },
+        "training_artifacts_available": len(models) > 0,
         "features": len(feature_names),
-        "status": "ready" if models else "models not loaded"
+        "status": "ready" if content_effectiveness_engine else "degraded"
     }
 
+
+@app.get("/internal/health")
+async def internal_health():
+	return {
+		"liveness": "ok",
+		"readiness": "ready" if content_effectiveness_engine is not None and nlp_extractor is not None else "not_ready",
+		"authentication_required": AUTH_REQUIRED,
+		"performance_prediction": performance_prediction_engine.readiness()["status"],
+		"timestamp": datetime.now(timezone.utc).isoformat(),
+	}
+
+@app.get("/evaluation/report")
+async def evaluation_report():
+	from intelligence.evaluation.monitoring import build_evaluation_report
+	return build_evaluation_report(
+		dataset_version="linkedin-master-2949-v1",
+		component_versions={
+			"content_effectiveness": "1.0.0",
+			"engagement_intelligence": "1.0.0",
+			"personal_intelligence": "1.0.0",
+			"recommendations": "1.0.0",
+			"forecasting": "0.1.0",
+		},
+		content={"status": "heuristic", "rubric_version": "content-rubric-1.0", "human_assessment_available": False, "notes": ["Human agreement evaluation is pending."]},
+		performance={"status": "descriptive", "missing_value_proportion": None, "observation_consistency": "captured-at unavailable in legacy dataset", "notes": ["The legacy model is not a forecasting result."]},
+		personal={"status": "account_baselines_available", "minimum_observation_count": 5, "baseline_stability": None, "notes": ["Public observations are excluded."]},
+		recommendations={"status": "deterministic", "acceptance_count": None, "helpful_count": None, "relevance_sample_count": None, "notes": ["Feedback collection is not yet a durable production store."]},
+		forecasting={"status": "not_ready", "baseline_comparison": None, "prediction_error": None, "calibration": None, "drift": None, "model_version": None, "notes": ["No validated forecasting model is enabled."]},
+	)
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok" if nlp_extractor is not None else "degraded",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "engines": {
+            "content_effectiveness": "ready" if content_effectiveness_engine else "unavailable",
+            "engagement_intelligence": "ready",
+            "performance_prediction": performance_prediction_engine.readiness()["status"],
+        },
         "models_loaded": len(models) > 0,
         "model_versions": MODEL_VERSIONS,
         "auth_required": AUTH_REQUIRED,
@@ -850,8 +794,11 @@ async def extract_features_endpoint(request: ExtractFeaturesRequest):
 async def classify_content(request: ClassifyContentRequest):
     if not request.content or not request.content.strip():
         raise HTTPException(status_code=400, detail="content is required")
+    if content_effectiveness_engine is None:
+        raise HTTPException(status_code=503, detail="Content effectiveness engine is unavailable")
 
-    _, features = extract_nlp_features(request.content)
+    assessment = content_effectiveness_engine.evaluate(request.content)
+    features = assessment['features']
     topic = _classify_topic(features, request.content)
     fmt = _classify_format(features, request.content)
     hook = _classify_hook(request.content)
@@ -860,6 +807,7 @@ async def classify_content(request: ClassifyContentRequest):
         "topic": topic,
         "format": fmt,
         "hook": hook,
+        "content_effectiveness": assessment,
     }
 
 
@@ -867,17 +815,18 @@ async def classify_content(request: ClassifyContentRequest):
 async def analyze_post(request: AnalyzePostRequest):
     if not request.content or not request.content.strip():
         raise HTTPException(status_code=400, detail="content is required")
+    if content_effectiveness_engine is None:
+        raise HTTPException(status_code=503, detail="Content effectiveness engine is unavailable")
 
-    X, features = extract_nlp_features(request.content)
-    X_scaled = scalers['standard'].transform(X) if models else None
+    assessment = content_effectiveness_engine.evaluate(request.content, request.intended_topic)
+    features = assessment['features']
 
     topic = _classify_topic(features, request.content)
     fmt = _classify_format(features, request.content)
     hook = _classify_hook(request.content)
     genericity = _genericity_score(features, request.content)
     similarity = _similarity_summary(request.content, request.historical_posts)
-    prediction = _predict_scores_from_features(X_scaled)
-    quality = _derive_strengths_weaknesses(features)
+    prediction = performance_prediction_engine.readiness()
 
     return {
         "topic": topic,
@@ -885,16 +834,12 @@ async def analyze_post(request: AnalyzePostRequest):
         "hook": hook,
         "genericity": genericity,
         "similarity": similarity,
-        "predicted_engagement": prediction,
+        "content_effectiveness": assessment,
+        "performance_prediction": prediction,
         "personal_relevance": round(1.0 - similarity["max_similarity"] * 0.5, 2),
-        "confidence": _calculate_confidence(similarity.get("sample_size", 0), has_model=bool(models)),
-        "strengths": quality["strengths"],
-        "weaknesses": quality["weaknesses"],
-        "recommendations": [
-            "Add specific evidence from your own experience",
-            "Use 3-5 relevant hashtags",
-            "Close with a concrete question or CTA",
-        ],
+        "strengths": assessment["strengths"],
+        "weaknesses": assessment["weaknesses"],
+        "recommendations": assessment["weaknesses"],
     }
 
 
@@ -916,7 +861,7 @@ async def validate_post(request: ValidatePostRequest):
             unsupported_claim_signal = 0.4
 
     return {
-        "predicted_engagement": analysis["predicted_engagement"],
+        "performance_prediction": analysis["performance_prediction"],
         "genericity_score": analysis["genericity"]["genericity"],
         "similarity": analysis["similarity"],
         "personal_relevance": analysis["personal_relevance"],
@@ -938,57 +883,39 @@ async def analyze_user(request: AnalyzeUserRequest):
     return {
         "user_id": request.user_id,
         "personal_performance": analysis,
-        "model": {"name": "personal_performance", "version": "0.1.0"},
+        "unidentified_posts_ignored": sum(not isinstance(post, dict) for post in request.historical_posts),
+        "model": {"name": "engagement_intelligence_engine", "version": "1.0.0"},
     }
 
 
+@app.post("/recommendations")
 @app.post("/recommend-content")
 async def recommend_content(request: RecommendContentRequest):
-    personal = _analyze_personal_performance(request.historical_posts, request.historical_performance)
-    sample_size = personal["sample_size"]
-
-    personal_weight = _clamp(_safe_div(sample_size, 40.0), 0.1, 0.8)
-    global_weight = round(1.0 - personal_weight, 2)
-
-    best_topic = request.optional_topic_request or request.candidate_topic
-    if not best_topic and personal.get("best_topics"):
-        best_topic = personal["best_topics"][0]["name"]
-    best_topic = best_topic or "Software Engineering"
-
-    best_format = "personal technical story"
-    if personal.get("best_formats"):
-        best_format = personal["best_formats"][0]["name"]
-
-    hook_type = "personal experience"
-    if personal.get("strong_hooks"):
-        hook_type = personal["strong_hooks"][0]["name"]
-
-    blueprint = _build_blueprint(best_topic, best_format, hook_type)
-    predicted_score = round(0.55 + personal_weight * 0.25, 2)
-    confidence = _calculate_confidence(sample_size, has_model=bool(models))
+    profile = dict(request.profile or {})
+    if request.optional_topic_request:
+        profile.setdefault("expertise", [request.optional_topic_request])
+    elif request.candidate_topic:
+        profile.setdefault("expertise", [request.candidate_topic])
+    recommendation = recommend_strategy(
+        profile=profile,
+        goal=request.goal,
+        historical_posts=request.historical_posts,
+        historical_performance=request.historical_performance,
+        global_evidence=request.global_context,
+    )
+    topic = recommendation.get("topic")
+    blueprint = _build_blueprint(
+        topic,
+        recommendation["format"],
+        recommendation["hook_strategy"],
+    ) if topic else None
 
     return {
-        "recommendation": {
-            "topic": best_topic,
-            "angle": f"What I learned while applying {best_topic} in real work",
-            "format": best_format,
-            "hook_strategy": hook_type,
-            "predicted_score": predicted_score,
-            "confidence": confidence,
-            "sample_size": sample_size,
-            "reasons": [
-                "Combines personal historical patterns with global priors",
-                "Aligned to engagement-oriented structure",
-                "Designed for evidence-backed authenticity",
-            ],
-            "weights": {
-                "global_signal": global_weight,
-                "personal_signal": round(personal_weight, 2),
-            },
-        },
+        "recommendation": recommendation,
         "content_blueprint": blueprint,
-        "things_to_avoid": blueprint["avoid"],
-        "model": {"name": "recommendation_engine", "version": MODEL_VERSIONS["recommendation_engine"]},
+        "things_to_avoid": recommendation["things_to_avoid"],
+        "performance_prediction": performance_prediction_engine.readiness(),
+        "model": {"name": "evidence_aware_recommendation_engine", "version": "1.0.0"},
     }
 
 
@@ -996,117 +923,63 @@ async def recommend_content(request: RecommendContentRequest):
 async def compare_candidates(request: CompareCandidatesRequest):
     if not request.candidates:
         raise HTTPException(status_code=400, detail="At least one candidate is required")
+    if content_effectiveness_engine is None:
+        raise HTTPException(status_code=503, detail="Content effectiveness engine is unavailable")
 
     scored = []
     for idx, candidate in enumerate(request.candidates):
-        analysis = await analyze_post(
-            AnalyzePostRequest(
-                content=candidate,
-                user_profile=request.profile,
-                historical_posts=request.historical_posts,
-            )
-        )
-        engagement = analysis["predicted_engagement"].get("engagement_score")
-        viral = analysis["predicted_engagement"].get("viral_probability")
-        if engagement is None:
-            engagement = 50.0
-        if viral is None:
-            viral = 50.0
-
-        final_score = round(
-            0.5 * _clamp(engagement / 100.0) +
-            0.3 * _clamp(viral / 100.0) +
-            0.2 * (1.0 - analysis["genericity"]["genericity"]),
-            3,
-        )
+        assessment = content_effectiveness_engine.evaluate(candidate, request.intended_topic)
 
         scored.append({
             "candidate_index": idx,
             "content_preview": candidate[:160],
-            "score": final_score,
-            "analysis": analysis,
+            "score": assessment["content_effectiveness_score"],
+            "score_type": assessment["score_type"],
+            "analysis": assessment,
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return {
         "ranked_candidates": scored,
         "best_candidate": scored[0] if scored else None,
-        "model": {"name": "candidate_ranker", "version": "0.1.0"},
+        "ranking_basis": "content_characteristics_only",
+        "model": {"name": "content_effectiveness_engine", "version": "1.0.0"},
     }
+
+@app.post("/intelligence/analyze")
+async def intelligence_analyze(request: IntelligenceAnalyzeRequest):
+    """Run only the intelligence components relevant to the supplied inputs."""
+    orchestrator = IntelligenceOrchestrator(build_default_registry(
+        content_engine=content_effectiveness_engine,
+        engagement_engine=engagement_intelligence_engine,
+        prediction_engine=performance_prediction_engine,
+    ))
+    try:
+        return orchestrator.analyze(AnalysisRequest(**request.model_dump()))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @app.post("/predict/engagement", response_model=PredictionResponse)
 async def predict_engagement(request: PostRequest):
-    """Predict engagement for a LinkedIn post using NLP features"""
-    
-    if not models or nlp_extractor is None:
+    """Report prediction readiness separately from content effectiveness."""
+    if content_effectiveness_engine is None:
         return {
             "content_preview": request.content[:50] + "...",
-            "predictions": {"error": "Models not loaded. Run train_models.py first."},
+            "predictions": performance_prediction_engine.readiness(),
             "top_features": [],
             "optimization_suggestions": []
         }
-    
-    # Extract NLP features from text
-    X, features_dict = extract_nlp_features(request.content)
-    
-    # Scale features
-    X_scaled = scalers['standard'].transform(X)
-    
-    # Make predictions
-    predictions = {}
-    
-    # Regression predictions (engagement scores)
-    for name, model in models['regression'].items():
-        score = float(model.predict(X_scaled)[0])
-        predictions[f'{name}_engagement_score'] = round(score, 2)
-    
-    # Classification predictions (probabilities)
-    for name, model in models['classification'].items():
-        proba = model.predict_proba(X_scaled)[0][1]
-        predictions[f'{name}_probability'] = round(proba * 100, 1)  # Convert to percentage
-        predictions[f'is_{name}'] = bool(model.predict(X_scaled)[0])
-    
-    # Get top features affecting this prediction
-    linear_model = models['regression']['linear']
-    coef = linear_model.coef_
-    
-    # Calculate contribution of each feature
-    feature_contributions = []
-    for i, fname in enumerate(feature_names):
-        contribution = float(coef[i] * X_scaled[0][i])
-        feature_contributions.append({
-            "feature": fname,
-            "value": round(float(features_dict.get(fname, 0)), 2),
-            "impact": round(contribution, 2)
-        })
-    
-    # Sort by absolute impact
-    feature_contributions.sort(key=lambda x: abs(x['impact']), reverse=True)
-    top_features = feature_contributions[:10]
-    
-    # Generate optimization suggestions
-    suggestions = []
-    
-    if features_dict.get('has_question', 0) == 0:
-        suggestions.append("💡 Add a question to boost engagement (e.g., 'What's your experience with this?')")
-    
-    if features_dict.get('hashtag_count', 0) < 3:
-        suggestions.append("💡 Add 2-3 relevant hashtags to increase discoverability")
-    
-    if features_dict.get('word_count', 0) < 100:
-        suggestions.append("💡 Expand your content to 150-250 words for better engagement")
-    
-    if features_dict.get('sentiment_polarity', 0) < 0:
-        suggestions.append("💡 Use more positive language to increase engagement")
-    
-    if features_dict.get('cta_score', 0) == 0:
-        suggestions.append("💡 Add a call-to-action: 'Share', 'Comment', or 'Tag someone'")
-    
+    assessment = content_effectiveness_engine.evaluate(request.content)
+    readiness = performance_prediction_engine.readiness()
     return {
         "content_preview": request.content[:100] + "...",
-        "predictions": predictions,
-        "top_features": top_features,
-        "optimization_suggestions": suggestions[:5]
+        "predictions": readiness,
+        "content_effectiveness": assessment,
+        "top_features": [
+            {"dimension": name, "score": score}
+            for name, score in assessment["dimension_scores"].items()
+        ],
+        "optimization_suggestions": assessment["weaknesses"][:5]
     }
 
 @app.get("/model/info")
@@ -1124,6 +997,7 @@ async def get_model_info():
     if os.path.exists(info_path):
         with open(info_path, 'r') as f:
             info['training_info'] = f.read()
+    info['training_metadata'] = training_metadata
     
     # Get top features
     if os.path.exists(feature_importance_path):
@@ -1139,54 +1013,49 @@ async def get_model_info():
 # ============================================================================
 
 class RefineRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
     style: Optional[str] = "professional"  # professional, casual, inspirational
-    variants: Optional[int] = 1  # Number of versions to generate (1-3)
+    variants: Optional[int] = Field(default=1, ge=1, le=MAX_VARIANTS)
 
 class RefineResponse(BaseModel):
     original: str
     refined: List[str]
     analysis: Dict
     improvements: List[str]
-    estimated_improvement: Dict
+    rubric_comparison: Dict
 
 @app.post("/refine/post", response_model=RefineResponse)
 async def refine_post(request: RefineRequest):
     """
-    Refine a LinkedIn post using AI based on ML model predictions
+    Refine a LinkedIn post using AI based on content-rubric evidence
     
     This endpoint:
-    1. Analyzes your post with ML models
+    1. Analyzes content characteristics
     2. Identifies what's missing (questions, hashtags, etc.)
     3. Uses GPT to rewrite it with improvements
     4. Returns both original and refined versions
     """
     
-    if not openai_client:
+    if refinement_service is None:
         raise HTTPException(
             status_code=503,
             detail="OpenAI API not configured. Add OPENAI_API_KEY to .env file."
         )
     
-    if not models or nlp_extractor is None:
+    if content_effectiveness_engine is None:
         raise HTTPException(
             status_code=503,
-            detail="ML models not loaded. Run train_models.py first."
+            detail="Content effectiveness engine is unavailable."
         )
     
-    # Step 1: Analyze the original post with ML model
-    X, features_dict = extract_nlp_features(request.content)
-    X_scaled = scalers['standard'].transform(X)
-    
-    # Get predictions
-    predictions = {}
-    for name, model in models['regression'].items():
-        score = float(model.predict(X_scaled)[0])
-        predictions[f'{name}_score'] = round(score, 2)
-    
-    for name, model in models['classification'].items():
-        proba = model.predict_proba(X_scaled)[0][1]
-        predictions[f'{name}_probability'] = round(proba * 100, 1)
+    # Step 1: Analyze text characteristics; performance forecasting is separate.
+    original_assessment = content_effectiveness_engine.evaluate(request.content)
+    features_dict = original_assessment['features']
+    predictions = {
+        "content_effectiveness_score": original_assessment['content_effectiveness_score'],
+        "score_type": original_assessment['score_type'],
+        "performance_prediction": performance_prediction_engine.readiness(),
+    }
     
     # Step 2: Build improvement context for AI
     improvements_needed = []
@@ -1225,9 +1094,9 @@ async def refine_post(request: RefineRequest):
 ORIGINAL POST:
 {request.content}
 
-CURRENT PERFORMANCE ANALYSIS:
-- Engagement Score: {predictions.get('linear_score', 0)}/100
-- Viral Probability: {predictions.get('viral_probability', 0)}%
+CURRENT CONTENT ANALYSIS:
+- Content rubric score: {predictions['content_effectiveness_score']} (not a performance forecast)
+- Performance prediction: unavailable until comparable impression- and audience-labelled outcomes are collected
 - Word Count: {int(features_dict.get('word_count', 0))}
 - Hashtags: {int(features_dict.get('hashtag_count', 0))}
 - Has Question: {'Yes' if features_dict.get('has_question', 0) else 'No'}
@@ -1241,7 +1110,7 @@ Create an improved version of this LinkedIn post that:
 1. Keeps the original message and authenticity
 2. Applies the improvements listed above
 3. Uses a {style_tone}
-4. Optimizes for LinkedIn engagement (saves, shares, comments)
+4. Improves clarity and structure without predicting or claiming engagement outcomes
 5. Uses line breaks for readability
 6. Is between 150-250 words
 7. Includes 3-5 relevant hashtags at the end
@@ -1249,74 +1118,40 @@ Create an improved version of this LinkedIn post that:
 
 IMPORTANT: Return ONLY the improved post text. No explanations, no metadata, just the post content."""
 
-    # Step 4: Generate refined versions with OpenAI
+    # Step 4: Generate bounded refined variants through the provider abstraction.
     try:
-        refined_versions = []
-        for i in range(min(request.variants, 3)):
-            model_to_use = os.getenv("OPENAI_MODEL", "gpt-5")
-            
-            print(f"\n[DEBUG] Calling OpenAI with:")
-            print(f"  Model: {model_to_use}")
-            print(f"  Max tokens: {os.getenv('OPENAI_MAX_TOKENS', 500)}")
-            print(f"  Prompt length: {len(prompt)} characters")
-            
-            response = openai_client.chat.completions.create(
-                model=model_to_use,
-                messages=[
-                    {"role": "system", "content": "You are an expert LinkedIn content writer who creates engaging, high-performing posts."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_completion_tokens=int(os.getenv("OPENAI_MAX_TOKENS", 500))
-            )
-            
-            print(f"\n[DEBUG] Response received:")
-            print(f"  Response object: {response}")
-            print(f"  Choices: {response.choices}")
-            print(f"  Message content: '{response.choices[0].message.content}'")
-            print(f"  Content length: {len(response.choices[0].message.content)} characters")
-            
-            refined_post = response.choices[0].message.content.strip()
-            
-            # Check if response is empty
-            if not refined_post:
-                print(f"\n[WARNING] Model returned empty response for variant {i+1}")
-                print(f"Full response: {response}")
-                # Fallback: return the original content if empty
-                refined_post = request.content
-            else:
-                print(f"[SUCCESS] Refined post generated ({len(refined_post)} chars)")
-            
-            refined_versions.append(refined_post)
+        refined_versions = refinement_service.refine_variants(
+            original=request.content,
+            style=style_tone,
+            assessment=original_assessment,
+            improvements=improvements_needed,
+            variant_count=request.variants,
+        )
         
-        # Step 5: Predict engagement for refined version(s)
-        estimated_improvements = {}
+        # Step 5: Compare content characteristics without forecasting outcomes.
+        rubric_comparison = {}
         for idx, refined in enumerate(refined_versions):
-            X_refined, features_refined = extract_nlp_features(refined)
-            X_refined_scaled = scalers['standard'].transform(X_refined)
-            
-            new_score = float(models['regression']['linear'].predict(X_refined_scaled)[0])
-            new_viral_prob = float(models['classification']['viral'].predict_proba(X_refined_scaled)[0][1] * 100)
-            
-            estimated_improvements[f'version_{idx+1}'] = {
-                'engagement_score': round(new_score, 2),
-                'viral_probability': round(new_viral_prob, 1),
-                'improvement': round(new_score - predictions.get('linear_score', 0), 2)
-            }
+            refined_assessment = content_effectiveness_engine.evaluate(refined)
+            rubric_comparison[f'version_{idx+1}'] = compare_assessments(original_assessment, refined_assessment)
         
         return {
             "original": request.content,
             "refined": refined_versions,
             "analysis": predictions,
             "improvements": improvements_needed,
-            "estimated_improvement": estimated_improvements
+            "rubric_comparison": rubric_comparison
         }
     
-    except Exception as e:
-        print(f"Error during refinement: {str(e)}")
-        print(f"Error type: {type(e)}")
+    except GenerativeProviderError:
+        raise HTTPException(
+            status_code=502,
+            detail="The content generation provider did not return a usable completion.",
+        )
+    except Exception:
+        logger.exception("unexpected_refinement_error")
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI API error: Error code: {str(e)}"
+            detail="Content refinement could not be completed.",
         )
 
 @app.post("/refine/compare")
@@ -1326,48 +1161,47 @@ async def compare_versions(request: PostRequest):
     Useful for A/B testing before posting
     """
     
-    if not openai_client:
+    if refinement_service is None:
         raise HTTPException(status_code=503, detail="OpenAI API not configured")
     
-    # Get analysis for original
-    X_orig, features_orig = extract_nlp_features(request.content)
-    X_orig_scaled = scalers['standard'].transform(X_orig)
-    
-    orig_score = float(models['regression']['linear'].predict(X_orig_scaled)[0])
-    orig_viral = float(models['classification']['viral'].predict_proba(X_orig_scaled)[0][1] * 100)
+    if content_effectiveness_engine is None:
+        raise HTTPException(status_code=503, detail="Content effectiveness engine is unavailable")
+    original_assessment = content_effectiveness_engine.evaluate(request.content)
     
     # Generate refined version (single, best version)
     refine_response = await refine_post(RefineRequest(content=request.content, variants=1))
     
     refined_text = refine_response["refined"][0]
-    refined_est = refine_response["estimated_improvement"]["version_1"]
+    refined_assessment = content_effectiveness_engine.evaluate(refined_text)
+    rubric_comparison = refine_response["rubric_comparison"]["version_1"]
     
     return {
         "comparison": {
             "original": {
                 "text": request.content,
-                "engagement_score": round(orig_score, 2),
-                "viral_probability": round(orig_viral, 1),
-                "word_count": int(features_orig.get('word_count', 0)),
-                "hashtags": int(features_orig.get('hashtag_count', 0))
+                "content_effectiveness_score": original_assessment['content_effectiveness_score'],
+                "score_type": original_assessment['score_type'],
+                "word_count": original_assessment['structure']['word_count'],
+                "hashtags": int(original_assessment['features'].get('hashtag_count', 0))
             },
             "refined": {
                 "text": refined_text,
-                "engagement_score": refined_est['engagement_score'],
-                "viral_probability": refined_est['viral_probability'],
-                "improvement": refined_est['improvement']
+                "content_effectiveness_score": refined_assessment['content_effectiveness_score'],
+                "score_type": refined_assessment['score_type'],
+                "rubric_comparison": rubric_comparison
             }
         },
-        "recommendation": "Use refined version" if refined_est['improvement'] > 5 else "Both versions are similar",
+        "recommendation": "Review the refined text against your goals; rubric scores are not performance forecasts.",
+        "performance_prediction": performance_prediction_engine.readiness(),
         "improvements_made": refine_response["improvements"]
     }
     
 
 if __name__ == "__main__":
     import uvicorn
-    print("\n🚀 Starting LinkedIn Growth AI API...")
-    print("📊 Models trained on 1,608 real LinkedIn posts")
-    print("🤖 OpenAI refinement: " + ("Enabled" if openai_client else "Disabled (add API key)"))
+    print("\nStarting LinkedIn Growth AI API...")
+    print("Performance prediction: not ready until validated labels and a model exist")
+    print("OpenAI refinement: " + ("Enabled" if openai_client else "Disabled (add API key)"))
     print("📍 API will be available at: http://localhost:8000")
     print("📖 Interactive docs at: http://localhost:8000/docs\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

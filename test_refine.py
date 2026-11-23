@@ -47,8 +47,8 @@ AI app developers focus on usability, performance, and user experience.AI model 
         
         # Show analysis
         print("\n📊 Original Post Analysis:")
-        print(f"  • Engagement Score: {result['analysis'].get('linear_score', 0):.1f}/100")
-        print(f"  • Viral Probability: {result['analysis'].get('viral_probability', 0):.1f}%")
+        print(f"  • Content rubric score: {result['analysis'].get('content_effectiveness_score', 0):.1f}")
+        print("  • Performance prediction: unavailable")
         
         print(f"\n🔍 Issues Found ({len(result['improvements'])} problems):")
         for i, issue in enumerate(result['improvements'], 1):
@@ -56,17 +56,16 @@ AI app developers focus on usability, performance, and user experience.AI model 
         
         # Show refined versions
         for idx, refined in enumerate(result['refined'], 1):
-            improvement = result['estimated_improvement'][f'version_{idx}']
+            improvement = result['rubric_comparison'][f'version_{idx}']
             
             print(f"\n{'='*80}")
             print(f"✨ Refined Version {idx}")
             print(f"{'='*80}")
             print(refined)
             print("-" * 80)
-            print(f"📈 Predicted Performance:")
-            print(f"  • Engagement Score: {improvement['engagement_score']:.1f}/100 ({improvement['improvement']:+.1f})")
-            print(f"  • Viral Probability: {improvement['viral_probability']:.1f}%")
-            print(f"  • Improvement: {improvement['improvement']:.1f} points")
+            print(f"📈 Rubric Comparison:")
+            print(f"  • Overall score change: {improvement['overall_score_change']:+.1f}")
+            print(f"  • Score type: {improvement['score_type']}")
         
         print("\n" + "="*80)
         print("✅ Refinement test completed successfully!")
@@ -116,15 +115,13 @@ def test_compare():
         print("ORIGINAL")
         print("="*80)
         print(f"Text: {comp['original']['text']}")
-        print(f"Engagement: {comp['original']['engagement_score']:.1f}")
-        print(f"Viral Prob: {comp['original']['viral_probability']:.1f}%")
+        print(f"Content rubric: {comp['original']['content_effectiveness_score']:.1f}")
         
         print("\n" + "="*80)
         print("REFINED")
         print("="*80)
         print(f"Text: {comp['refined']['text']}")
-        print(f"Engagement: {comp['refined']['engagement_score']:.1f} ({comp['refined']['improvement']:+.1f})")
-        print(f"Viral Prob: {comp['refined']['viral_probability']:.1f}%")
+        print(f"Content rubric: {comp['refined']['content_effectiveness_score']:.1f}")
         
         print(f"\n🎯 Recommendation: {result['recommendation']}")
         

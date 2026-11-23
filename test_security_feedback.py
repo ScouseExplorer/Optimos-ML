@@ -45,7 +45,7 @@ def test_feedback_endpoints():
         json={
             "user_id": "user-123",
             "recommendation_id": "rec-1",
-            "event_type": "liked_recommendation",
+            "event_type": "helpful",
             "metadata": {"note": "felt authentic"},
         },
     )
@@ -58,7 +58,7 @@ def test_feedback_endpoints():
             "user_id": "user-123",
             "post_id": "post-99",
             "content": "I shared a failure in our migration and what we changed.",
-            "predicted": {"engagement_score": 0.74},
+            "predicted": None,
             "metrics": {
                 "likes": 120,
                 "comments": 20,

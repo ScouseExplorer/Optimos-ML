@@ -9,6 +9,8 @@ import requests
 import os
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+ML_SERVICE_API_KEY = os.getenv("ML_SERVICE_API_KEY", "")
+API_HEADERS = {"X-ML-API-Key": ML_SERVICE_API_KEY} if ML_SERVICE_API_KEY else {}
 
 
 def pretty(label, payload):
@@ -35,15 +37,16 @@ def run():
         )
     }
 
-    features = must_ok(requests.post(f"{BASE_URL}/extract-features", json=post, timeout=30), "extract-features")
+    features = must_ok(requests.post(f"{BASE_URL}/extract-features", headers=API_HEADERS, json=post, timeout=30), "extract-features")
     pretty("extract-features", {"feature_count": features.get("feature_count")})
 
-    classified = must_ok(requests.post(f"{BASE_URL}/classify-content", json=post, timeout=30), "classify-content")
+    classified = must_ok(requests.post(f"{BASE_URL}/classify-content", headers=API_HEADERS, json=post, timeout=30), "classify-content")
     pretty("classify-content", classified)
 
     analyzed = must_ok(
         requests.post(
             f"{BASE_URL}/analyze-post",
+            headers=API_HEADERS,
             json={
                 "content": post["content"],
                 "historical_posts": [
@@ -60,6 +63,7 @@ def run():
     user_analysis = must_ok(
         requests.post(
             f"{BASE_URL}/analyze-user",
+            headers=API_HEADERS,
             json={
                 "user_id": "user-1",
                 "historical_posts": [
@@ -77,6 +81,7 @@ def run():
     recommendation = must_ok(
         requests.post(
             f"{BASE_URL}/recommend-content",
+            headers=API_HEADERS,
             json={
                 "user_id": "user-1",
                 "profile": {"industry": "Technology", "role": "Software Engineer", "expertise": ["Cloud", "Fintech", "Backend"]},
@@ -96,6 +101,7 @@ def run():
     compared = must_ok(
         requests.post(
             f"{BASE_URL}/compare-candidates",
+            headers=API_HEADERS,
             json={
                 "historical_posts": [
                     "How we improved API reliability by redesigning retries.",
@@ -116,6 +122,7 @@ def run():
     validated = must_ok(
         requests.post(
             f"{BASE_URL}/validate-post",
+            headers=API_HEADERS,
             json={
                 "content": post["content"],
                 "historical_posts": [
@@ -132,6 +139,34 @@ def run():
         "validate-post",
     )
     pretty("validate-post", validated)
+
+    orchestrated = must_ok(
+        requests.post(
+            f"{BASE_URL}/intelligence/analyze",
+            headers=API_HEADERS,
+            json={"content": post["content"], "components": ["content_effectiveness", "recommendation_ranking"]},
+            timeout=40,
+        ),
+        "intelligence/analyze",
+    )
+    pretty("intelligence/analyze", orchestrated)
+
+    recommendations = must_ok(
+        requests.post(
+            f"{BASE_URL}/recommendations",
+            headers=API_HEADERS,
+            json={"profile": {"expertise": ["Cloud"]}, "goal": "help peers", "historical_posts": []},
+            timeout=40,
+        ),
+        "recommendations",
+    )
+    pretty("recommendations", recommendations)
+
+    evaluation = must_ok(requests.get(f"{BASE_URL}/evaluation/report", headers=API_HEADERS, timeout=20), "evaluation/report")
+    pretty("evaluation/report", evaluation)
+
+    internal_health = must_ok(requests.get(f"{BASE_URL}/internal/health", headers=API_HEADERS, timeout=20), "internal/health")
+    pretty("internal/health", internal_health)
 
     print("\nAll intelligence endpoint smoke tests passed.")
 
