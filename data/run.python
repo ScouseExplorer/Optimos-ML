@@ -1,0 +1,15 @@
+
+import json
+
+with open("linkedin_posts.json", "r", encoding="utf-8") as f:
+    posts = json.load(f)
+
+print("TOTAL POSTS:", len(posts))
+
+print("\n--- FIRST ORIGINAL POST ---")
+
+print(json.dumps(
+    posts[0],
+    indent=4,
+    ensure_ascii=False
+))
